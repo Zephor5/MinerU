@@ -1,4 +1,5 @@
 import time
+from typing import Generator
 
 import cv2
 import numpy as np
@@ -29,20 +30,20 @@ class BatchAnalyze:
         self.model = model
         self.batch_ratio = batch_ratio
 
-    def __call__(self, images: list) -> list:
+    def _process_inner_batch(self, batch_images: list) -> list:
         images_layout_res = []
 
         layout_start_time = time.time()
         if self.model.layout_model_name == MODEL_NAME.LAYOUTLMv3:
             # layoutlmv3
-            for image in images:
+            for image in batch_images:
                 layout_res = self.model.layout_model(image, ignore_catids=[])
                 images_layout_res.append(layout_res)
         elif self.model.layout_model_name == MODEL_NAME.DocLayout_YOLO:
             # doclayout_yolo
             layout_images = []
             modified_images = []
-            for image_index, image in enumerate(images):
+            for image_index, image in enumerate(batch_images):
                 pil_img = Image.fromarray(image)
                 # width, height = pil_img.size
                 # if height > width:
@@ -72,7 +73,7 @@ class BatchAnalyze:
                                 res['poly'][i] - useful_list[1] + useful_list[3]
                             )
         logger.info(
-            f'layout time: {round(time.time() - layout_start_time, 2)}, image num: {len(images)}'
+            f'layout time: {round(time.time() - layout_start_time, 2)}, image num: {len(batch_images)}'
         )
 
         if self.model.apply_formula:
@@ -80,21 +81,21 @@ class BatchAnalyze:
             mfd_start_time = time.time()
             images_mfd_res = self.model.mfd_model.batch_predict(
                 # images, self.batch_ratio * MFD_BASE_BATCH_SIZE
-                images, MFD_BASE_BATCH_SIZE
+                batch_images, MFD_BASE_BATCH_SIZE
             )
             logger.info(
-                f'mfd time: {round(time.time() - mfd_start_time, 2)}, image num: {len(images)}'
+                f'mfd time: {round(time.time() - mfd_start_time, 2)}, image num: {len(batch_images)}'
             )
 
             # 公式识别
             mfr_start_time = time.time()
             images_formula_list = self.model.mfr_model.batch_predict(
                 images_mfd_res,
-                images,
+                batch_images,
                 batch_size=self.batch_ratio * MFR_BASE_BATCH_SIZE,
             )
             mfr_count = 0
-            for image_index in range(len(images)):
+            for image_index in range(len(batch_images)):
                 images_layout_res[image_index] += images_formula_list[image_index]
                 mfr_count += len(images_formula_list[image_index])
             logger.info(
@@ -109,9 +110,9 @@ class BatchAnalyze:
         table_time = 0
         table_count = 0
         # reference: magic_pdf/model/doc_analyze_by_custom_model.py:doc_analyze
-        for index in range(len(images)):
+        for index in range(len(batch_images)):
             layout_res = images_layout_res[index]
-            pil_img = Image.fromarray(images[index])
+            pil_img = Image.fromarray(batch_images[index])
 
             ocr_res_list, table_res_list, single_page_mfdetrec_res = (
                 get_res_list_from_layout_res(layout_res)
@@ -197,6 +198,20 @@ class BatchAnalyze:
             logger.info(f'table time: {round(table_time, 2)}, image num: {table_count}')
 
         return images_layout_res
+
+    def __call__(self, image_g: Generator) -> Generator:
+        # 选择最大的实际batch作为内存图像占用的标准，FIXME: 根据剩余内存自动推算batch_size
+        batch_size = self.batch_ratio * MFR_BASE_BATCH_SIZE
+        current_batch = []
+        for image in image_g:
+            current_batch.append(image)
+            if len(current_batch) >= batch_size:
+                logger.info(f'batch in memory, image num: {len(current_batch)}')
+                yield from self._process_inner_batch(current_batch)
+                current_batch = []
+        if current_batch:
+            logger.info(f'batch in memory, image num: {len(current_batch)}')
+            yield from self._process_inner_batch(current_batch)
 
 
 # def doc_batch_analyze(

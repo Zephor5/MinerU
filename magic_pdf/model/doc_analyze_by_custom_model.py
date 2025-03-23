@@ -1,5 +1,7 @@
 import os
 import time
+from typing import Generator
+
 import torch
 
 os.environ['FLAGS_npu_jit_compile'] = '0'  # 关闭paddle的jit编译
@@ -187,18 +189,21 @@ def doc_analyze(
         # batch analyze
         images = []
         page_wh_list = []
-        for index in range(len(dataset)):
-            if start_page_id <= index <= end_page_id:
-                page_data = dataset.get_page(index)
-                img_dict = page_data.get_image()
-                images.append(img_dict['img'])
-                page_wh_list.append((img_dict['width'], img_dict['height']))
+
+        def batch_image_gen() -> Generator:
+            for _index in range(len(dataset)):
+                if start_page_id <= _index <= end_page_id:
+                    _page = dataset.get_page(_index)
+                    _img_dict = _page.get_image()
+                    page_wh_list.append((_img_dict['width'], _img_dict['height']))
+                    yield _img_dict['img']
+
         batch_model = BatchAnalyze(model=custom_model, batch_ratio=batch_ratio)
-        analyze_result = batch_model(images)
+        analyze_result_g = batch_model(batch_image_gen())
 
         for index in range(len(dataset)):
             if start_page_id <= index <= end_page_id:
-                result = analyze_result.pop(0)
+                result = next(analyze_result_g)
                 page_width, page_height = page_wh_list.pop(0)
             else:
                 result = []
